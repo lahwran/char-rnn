@@ -76,6 +76,16 @@ torch.manualSeed(opt.seed)
 local test_frac = math.max(0, 1 - (opt.train_frac + opt.val_frac))
 local split_sizes = {opt.train_frac, opt.val_frac, test_frac} 
 
+function asgpu(v)
+    if opt.gpuid >=0 and opt.opencl == 0 then
+        return v:float():cuda()
+    end
+    if opt.gpuid >=0 and opt.opencl == 1 then
+        return v:cl()
+    end
+end
+
+
 -- initialize cunn/cutorch for training on the GPU and fall back to CPU gracefully
 if opt.gpuid >= 0 and opt.opencl == 0 then
     local ok, cunn = pcall(require, 'cunn')
@@ -162,8 +172,7 @@ end
 init_state = {}
 for L=1,opt.num_layers do
     local h_init = torch.zeros(opt.batch_size, opt.rnn_size)
-    if opt.gpuid >=0 and opt.opencl == 0 then h_init = h_init:cuda() end
-    if opt.gpuid >=0 and opt.opencl == 1 then h_init = h_init:cl() end
+    h_init = asgpu(h_init)
     table.insert(init_state, h_init:clone())
     if opt.model == 'lstm' then
         table.insert(init_state, h_init:clone())
@@ -171,12 +180,7 @@ for L=1,opt.num_layers do
 end
 
 -- ship the model to the GPU if desired
-if opt.gpuid >= 0 and opt.opencl == 0 then
-    for k,v in pairs(protos) do v:cuda() end
-end
-if opt.gpuid >= 0 and opt.opencl == 1 then
-    for k,v in pairs(protos) do v:cl() end
-end
+for k,v in pairs(protos) do asgpu(v) end
 
 -- put the above things into one flattened parameters tensor
 params, grad_params = model_utils.combine_all_parameters(protos.rnn)
@@ -210,15 +214,8 @@ end
 function prepro(x,y)
     x = x:transpose(1,2):contiguous() -- swap the axes for faster indexing
     y = y:transpose(1,2):contiguous()
-    if opt.gpuid >= 0 and opt.opencl == 0 then -- ship the input arrays to GPU
-        -- have to convert to float because integers can't be cuda()'d
-        x = x:float():cuda()
-        y = y:float():cuda()
-    end
-    if opt.gpuid >= 0 and opt.opencl == 1 then -- ship the input arrays to GPU
-        x = x:cl()
-        y = y:cl()
-    end
+    x = asgpu(x)
+    y = asgpu(y)
     return x,y
 end
 
