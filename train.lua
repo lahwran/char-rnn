@@ -64,6 +64,11 @@ cmd:option('-gpuid',0,'which gpu to use. -1 = use CPU')
 cmd:option('-opencl',0,'use OpenCL (instead of CUDA)')
 cmd:text()
 
+-- TODO: bayesian search - might be that we can wrap the thingy?
+-- TODO: spearmint looks pretty easy to use. promising! if we can't get things
+-- TODO: to work, then hook up to spearmint. The CGRU paper used grid search,
+-- TODO: and couldn't get good results without it.
+
 -- parse input params
 opt = cmd:parse(arg)
 torch.manualSeed(opt.seed)
@@ -82,10 +87,7 @@ if opt.gpuid >= 0 and opt.opencl == 0 then
         cutorch.setDevice(opt.gpuid + 1) -- note +1 to make it 0 indexed! sigh lua
         cutorch.manualSeed(opt.seed)
     else
-        print('If cutorch and cunn are installed, your CUDA toolkit may be improperly configured.')
-        print('Check your CUDA toolkit installation, rebuild cutorch and cunn, and try again.')
-        print('Falling back on CPU mode')
-        opt.gpuid = -1 -- overwrite user setting
+        print(1/0)
     end
 end
 
@@ -150,6 +152,8 @@ else
         protos.rnn = GRU.gru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     elseif opt.model == 'rnn' then
         protos.rnn = RNN.rnn(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
+    -- TODO: elseif opt.model == 'cgru' then
+    -- TODO: protos.rnn = CGRU.cgru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     end
     protos.criterion = nn.ClassNLLCriterion()
 end
@@ -265,14 +269,29 @@ function feval(x)
     local rnn_state = {[0] = init_state_global}
     local predictions = {}           -- softmax outputs
     local loss = 0
+    -- TODO: if opt.model == 'cgru' then
+    -- TODO:     pre-fill init_state_global with
+    -- TODO:     opt.cgru_prefill_amount number of steps worth of text
+    -- TODO: end
     for t=1,opt.seq_length do
         clones.rnn[t]:training() -- make sure we are in correct mode (this is cheap, sets flag)
+        -- TODO: if opt.model == 'cgru' then
+        -- TODO:     rnn_state[t-1][1][0][0] = x[t]
+        -- TODO:     skip x[t] as an argument
+        -- TODO: end
         local lst = clones.rnn[t]:forward{x[t], unpack(rnn_state[t-1])}
         rnn_state[t] = {}
         for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end -- extract the state, without output
         predictions[t] = lst[#lst] -- last element is the prediction
         loss = loss + clones.criterion[t]:forward(predictions[t], y[t])
     end
+    -- TODO: parameter sharing relaxation - not just for cgru
+    -- TODO: if opt.param_sharing_relaxation then
+    -- TODO:     ??????
+    -- TODO:     something regarding unsharing the weights of clones?
+    -- TODO:     see the end of "neural gpus learn algorithms"
+    -- TODO:     ??????
+    -- TODO: end
     loss = loss / opt.seq_length
     ------------------ backward pass -------------------
     -- initialize gradient at time t to be zeros (there's no influence from future)

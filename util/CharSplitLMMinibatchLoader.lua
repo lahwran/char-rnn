@@ -127,7 +127,7 @@ function CharSplitLMMinibatchLoader.text_to_tensor(in_textfile, out_vocabfile, o
     local timer = torch.Timer()
 
     print('loading text file...')
-    local cache_len = 10000
+    local buffer_len = 10000
     local rawdata
     local tot_len = 0
     local f = assert(io.open(in_textfile, "r"))
@@ -136,13 +136,13 @@ function CharSplitLMMinibatchLoader.text_to_tensor(in_textfile, out_vocabfile, o
     print('creating vocabulary mapping...')
     -- record all characters to a set
     local unordered = {}
-    rawdata = f:read(cache_len)
+    rawdata = f:read(buffer_len)
     repeat
         for char in rawdata:gmatch'.' do
             if not unordered[char] then unordered[char] = true end
         end
         tot_len = tot_len + #rawdata
-        rawdata = f:read(cache_len)
+        rawdata = f:read(buffer_len)
     until not rawdata
     f:close()
     -- sort into a table (i.e. keys become 1..N)
@@ -159,13 +159,13 @@ function CharSplitLMMinibatchLoader.text_to_tensor(in_textfile, out_vocabfile, o
     local data = torch.ByteTensor(tot_len) -- store it into 1D first, then rearrange
     f = assert(io.open(in_textfile, "r"))
     local currlen = 0
-    rawdata = f:read(cache_len)
+    rawdata = f:read(buffer_len)
     repeat
         for i=1, #rawdata do
             data[currlen+i] = vocab_mapping[rawdata:sub(i, i)] -- lua has no string indexing using []
         end
         currlen = currlen + #rawdata
-        rawdata = f:read(cache_len)
+        rawdata = f:read(buffer_len)
     until not rawdata
     f:close()
 
