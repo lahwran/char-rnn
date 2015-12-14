@@ -40,6 +40,8 @@ function GRU.gru(input_size, rnn_size, n, dropout)
     local reset_gate = nn.Sigmoid()(new_input_sum(input_size_L, x, prev_h))
     -- compute candidate hidden state
     local gated_hidden = nn.CMulTable()({reset_gate, prev_h})
+    -- TODO: I think this adds biases twice. the gru definition doesn't. probably
+    -- TODO: doesn't break anything.
     local p2 = nn.Linear(rnn_size, rnn_size)(gated_hidden)
     local p1 = nn.Linear(input_size_L, rnn_size)(x)
     local hidden_candidate = nn.Tanh()(nn.CAddTable()({p1,p2}))

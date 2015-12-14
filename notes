@@ -1,0 +1,94 @@
+train.lua:
+
+lua weirdness: "pairs" is the word for "get_iterator" (????)
+
+- imports
+- options
+
+- misc stuff:
+    - rng 
+    - test/train split math
+    - cuda setup
+
+- text load:
+    - get files
+    - check preprocessed existence
+    - preprocess into tensors
+        - read file into unordered set of characters (unordered)
+            - probably doesn't save strings because the file may be huge - 
+                who cares, we have gigabytes of ram
+        - make ordered list of characters
+        - make char->index mapping
+        - make 1d tensor of indexes, by character
+        - save vocab mapping and data tensor as torch files
+    - load vocab mapping and indexes tensor
+    - batch chunking:
+        - chop off (len mod (batch_size * unroll_length)) so that it will be
+            properly divisible
+        - store dataset length
+        - make shifted-forward ydata (with last element as first of xdata)
+        - split data into an array of batch-items, each batch-item being an array
+            that is the sequence
+        - split the batch-item arrays, such that you have some number of chunks of
+            batch-items that are all of length sequence-length
+        - save the chunks of batch-items as an array of batches
+    - count vocab size
+    - calculate sizes of train/validation/test:
+        - assert each of train/val/test fractions are in range [0, 1]
+        - split it up according to train/val/test fractions - each is a
+            percentage of the total dataset size
+        - save "current batch" indexes for each of train/val/test
+    - collect garbage
+
+- make dir for storing saved models in
+- create the model:
+    - if loading from a saved model, do that
+        - sanity check to make sure that the vocab is compatible
+    - if creating a new one, create a new one:
+        - look up the right model creator
+        - invoke the model creator and save the created model as a "prototype",
+            passing in the shape (vocab size, layer width, layer count, dropout
+            amount)
+        - create an nn.ClassNllCriterion() and save that as a prototype, too
+
+- initialize first hidden states - one for each argument position in the net.
+    if lstm, double the inputs, because lstm has multiple (why?)
+
+- use model_utils.combine_all_parameters - magic spell that swaps out tensor
+    storage such that all parameters are in one tensor
+- randomize the values of that one tensor
+
+- if lstm, iterate through and select the sub-layer blocks that have the forget
+    gate inputs and set them to one
+
+- make clones object from protos, using the same layout as protos.
+    - cloned with whatever the ---- clone_many_times does.
+
+- TODO: finish summarizing. this code is a mess and needs a doc
+
+
+appendix A: rnn model creator
+
+- create an identity transform layer as the input layer for the actual inputs
+- create more identity transforms as the inputs for each hidden state that is
+    passed on
+- pass input through:
+    - onehot encoder layer - see util/OneHot.lua. input tensor
+        is of dimensionality [1]
+    - layers:
+        - grab most recently created output
+        - dropout before non-first layers
+        - grab appropriate layer memory input
+        - input to hidden layer
+        - hidden to hidden layer
+        - nn.CAddTable() to sum them
+        - tanh activation
+    - insert resulting output into next_hidden outputs
+- take final output
+- add one more dropout, if necessary (would it be better to add dropout after
+    instead of before? seems obviously good, maybe it isn't and I'm missing
+    something)
+- add a non-recurrent linear from final recurrent output to end
+- add logsoftmax final activation
+- add logsoftmax to outputs
+- create graph module with inputs and outputs

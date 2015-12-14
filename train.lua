@@ -162,8 +162,8 @@ else
         protos.rnn = GRU.gru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     elseif opt.model == 'rnn' then
         protos.rnn = RNN.rnn(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
-    -- TODO: elseif opt.model == 'cgru' then
-    -- TODO: protos.rnn = CGRU.cgru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
+    elseif opt.model == 'cgru' then
+        protos.rnn = CGRU.cgru(vocab_size, opt.rnn_size, opt.dropout)
     end
     protos.criterion = nn.ClassNLLCriterion()
 end
@@ -187,6 +187,7 @@ params, grad_params = model_utils.combine_all_parameters(protos.rnn)
 
 -- initialization
 if do_random_init then
+    -- TODO: what initialization did n-gpu/c-gru paper use?
     params:uniform(-0.08, 0.08) -- small uniform numbers
 end
 -- initialize the LSTM forget gates with slightly higher biases to encourage remembering in the beginning
@@ -233,6 +234,9 @@ function eval_split(split_index, max_batches)
         -- fetch a batch
         local x, y = loader:next_batch(split_index)
         x,y = prepro(x,y)
+        -- TODO: whatever we do to the forward pass in feval also needs to be
+        -- TODO: done here, and in sample.lua (really could benefit from less
+        -- TODO: code duplication...)
         -- forward pass
         for t=1,opt.seq_length do
             clones.rnn[t]:evaluate() -- for dropout proper functioning
@@ -285,13 +289,15 @@ function feval(x)
     -- TODO: parameter sharing relaxation - not just for cgru
     -- TODO: if opt.param_sharing_relaxation then
     -- TODO:     ??????
-    -- TODO:     something regarding unsharing the weights of clones?
+    -- TODO:     something regarding unsharing the weights of clones and then
+    -- TODO:     mathing it somehow?
     -- TODO:     see the end of "neural gpus learn algorithms"
     -- TODO:     ??????
     -- TODO: end
     loss = loss / opt.seq_length
     ------------------ backward pass -------------------
     -- initialize gradient at time t to be zeros (there's no influence from future)
+    -- TODO: gradient noise - probably already solved in torch, or trivially easy
     local drnn_state = {[opt.seq_length] = clone_list(init_state, true)} -- true also zeros the clones
     for t=opt.seq_length,1,-1 do
         -- backprop through loss, and softmax/linear
@@ -309,6 +315,8 @@ function feval(x)
     end
     ------------------------ misc ----------------------
     -- transfer final state to initial state (BPTT)
+    -- TODO: what is bptt, exactly? I thought it was just backprop over multiple
+    -- TODO: timesteps, but this looks like it might be doing more than that?
     init_state_global = rnn_state[#rnn_state] -- NOTE: I don't think this needs to be a clone, right?
     -- grad_params:div(opt.seq_length) -- this line should be here but since we use rmsprop it would have no effect. Removing for efficiency
     -- clip gradient element-wise
