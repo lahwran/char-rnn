@@ -39,6 +39,7 @@ function CharSplitLMMinibatchLoader.create(data_dir, batch_size, seq_length, spl
     end
 
     print('loading data files...')
+    -- data is a 1d tensor the size of the original input file
     local data = torch.load(tensor_file)
     self.vocab_mapping = torch.load(vocab_file)
 
@@ -62,8 +63,20 @@ function CharSplitLMMinibatchLoader.create(data_dir, batch_size, seq_length, spl
     self.seq_length = seq_length
 
     local ydata = data:clone()
-    ydata:sub(1,-2):copy(data:sub(2,-1))
-    ydata[-1] = data[1]
+    ydata:sub(1,-2):copy(data:sub(2,-1)) -- shift by one
+    ydata[-1] = data[1] -- wrap the very last one, because what do you even do
+    -- view(): split data into an array of batch-items, each batch-item being
+    -- an array that is the sequence, of length data.len() / batch_item_count
+    --
+    -- split(): split the batch-item arrays, such that you have some number of
+    -- chunks of batch-items that are all of length sequence-length.
+    --
+    -- result: table of (data.len()/batch_item_count)/seq_length tensors of size
+    -- (batch_item_count, seq_length)
+    --
+    -- bonus points: opt.batch_continuity relies on this operation producing
+    -- batches that traverse the dataset sequentially across the table of
+    -- batches. when modifying this, keep that guarantee.
     self.x_batches = data:view(batch_size, -1):split(seq_length, 2)  -- #rows = #batches
     self.nbatches = #self.x_batches
     self.y_batches = ydata:view(batch_size, -1):split(seq_length, 2)  -- #rows = #batches
@@ -119,6 +132,7 @@ function CharSplitLMMinibatchLoader:next_batch(split_index)
     local ix = self.batch_ix[split_index]
     if split_index == 2 then ix = ix + self.ntrain end -- offset by train set size
     if split_index == 3 then ix = ix + self.ntrain + self.nval end -- offset by train + val
+    -- return: tensor(batch_size, seq_length), tensor(batch_size, seq_length)
     return self.x_batches[ix], self.y_batches[ix]
 end
 

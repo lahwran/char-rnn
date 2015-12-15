@@ -40,18 +40,15 @@ Paper reference: http://arxiv.org/abs/1511.08228
 -- TODO: probably want to do rolling unrolling for many more timesteps now
 -- TODO: segmented data
 -- TODO: per-line prediction is actually viable with this, though it'll need thinking time
-function CGRU.cgru(input_size, m, dropout)
+function CGRU.cgru(input_size, m, dropout, in_x, in_y, out_x, out_y)
     dropout = dropout or 0 
     -- there is only one input
     local inputs = {}
     table.insert(inputs, nn.Identity()()) -- character index
     table.insert(inputs, nn.Identity()()) -- prev_h
-
-    local slice_x = 1
-    local slice_y = 1
     
     embedded = nn.LookupTable(input_size, m)()
-    local updated_h = WriteSlice({{}, slice_x, slice_y})({embedded, inputs[1]})
+    local updated_h = WriteSlice({{}, in_x, in_y})({embedded, inputs[1]})
 
     local prev_h = updated_h
 
@@ -110,7 +107,7 @@ function CGRU.cgru(input_size, m, dropout)
     -- TODO: probably?
     --
 
-    local sliced = ReadSlice({{}, slice_x, slice_y})(next_h)
+    local sliced = ReadSlice({{}, out_x, out_y})(next_h)
     local proj = nn.Linear(m, input_size)(sliced)
     local logsoft = nn.LogSoftMax()(proj)
     -- TODO: the small range of gradients means we will only get gradients for
@@ -119,7 +116,13 @@ function CGRU.cgru(input_size, m, dropout)
     -- TODO: means that we're going to get a lot of filters that are nothing but
     -- TODO: "move" operators, probably? because it'll be advantageous to do that.
     -- TODO: might be worth setting a sparsity rule, too, in addition to dropout,
-    -- TODO: but maybe not
+    -- TODO: but maybe not.
+    --
+    -- TODO: Also, it might be worth letting it think for more
+    -- TODO: time steps in between giving it a next character, because it's
+    -- TODO: not very much time to predict the next character every time. It's
+    -- TODO: not too horrible, though, because every character is much more often
+    -- TODO: than every word.
     table.insert(outputs, logsoft)
 
     return nn.gModule(inputs, outputs)

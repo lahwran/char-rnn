@@ -26,6 +26,7 @@ local model_utils = require 'util.model_utils'
 local LSTM = require 'model.LSTM'
 local GRU = require 'model.GRU'
 local RNN = require 'model.RNN'
+local CGRU = require 'model.CGRU'
 
 cmd = torch.CmdLine()
 cmd:text()
@@ -62,16 +63,40 @@ cmd:option('-accurate_gpu_timing',0,'set this flag to 1 to get precise timings w
 -- GPU/CPU
 cmd:option('-gpuid',0,'which gpu to use. -1 = use CPU')
 cmd:option('-opencl',0,'use OpenCL (instead of CUDA)')
+cmd:option('-cgru_width',15,'width of the cgru "mental image"')
+cmd:option('-cgru_height',15,'height of the cgru "mental image"')
+cmd:option('-cgru_in_x', 1, 'position x to write to in mental image')
+cmd:option('-cgru_in_y', 1, 'position y to write to in mental image')
+cmd:option('-cgru_out_x', 0, 'position x to read from in mental image (0 = cgru_in_x)')
+cmd:option('-cgru_out_y', 0, 'position y to read from in mental image (0 = cgru_in_y)')
 cmd:text()
 
--- TODO: bayesian search - might be that we can wrap the thingy?
+-- TODO: bayesian optimization - might be that we can wrap the thingy?
 -- TODO: spearmint looks pretty easy to use. promising! if we can't get things
 -- TODO: to work, then hook up to spearmint. The CGRU paper used grid search,
 -- TODO: and couldn't get good results without it.
 -- TODO: (later) oh, I already made this note. I guess I've made it in two
 -- TODO: places now.
---
--- TODO: set layer count to 1 if cgru.
+
+if opt.model == 'cgru' then
+    -- we don't even try to have more than this at the moment.
+    -- TODO: but it might be a good idea to let it. the problem is, do we really
+    --       want to have a bunch of layers with permanently unshared weights?
+    --       I think what we really want is to repeat the same layer, but then
+    --       also add parameter sharing relaxation. maybe an option for number
+    --       of iterations to repeatedly invoke the network with the same input?
+    --       or with no input. though probably that'll completely fall flat with
+    --       RNNs, because they have no memory to speak of. the CGRU might
+    --       benefit, but without parameter sharing relaxation it'll run into
+    --       the same old problem.
+    opt.num_layers = 1
+end
+if opt.cgru_out_x == 0 then
+    opt.cgru_out_x = opt.cgru_in_x
+end
+if opt.cgru_out_y == 0 then
+    opt.cgru_out_y = opt.cgru_in_y
+end
 
 -- parse input params
 opt = cmd:parse(arg)
@@ -90,7 +115,8 @@ function asgpu(v)
 end
 
 
--- initialize cunn/cutorch for training on the GPU and fall back to CPU gracefully
+-- initialize cunn/cutorch for training on the GPU and bail and tell the user
+-- if no gpu is available
 if opt.gpuid >= 0 and opt.opencl == 0 then
     local ok, cunn = pcall(require, 'cunn')
     local ok2, cutorch = pcall(require, 'cutorch')
@@ -101,7 +127,7 @@ if opt.gpuid >= 0 and opt.opencl == 0 then
         cutorch.setDevice(opt.gpuid + 1) -- note +1 to make it 0 indexed! sigh lua
         cutorch.manualSeed(opt.seed)
     else
-        print(1/0)
+        os.exit(1)
     end
 end
 
@@ -167,26 +193,26 @@ else
     elseif opt.model == 'rnn' then
         protos.rnn = RNN.rnn(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     elseif opt.model == 'cgru' then
-        protos.rnn = CGRU.cgru(vocab_size, opt.rnn_size, opt.dropout)
+        protos.rnn = CGRU.cgru(vocab_size, opt.rnn_size, opt.dropout,
+                            opt.cgru_in_x, opt.cgru_in_y,
+                            opt.cgru_out_x, opt.cgru_out_y)
     end
     protos.criterion = nn.ClassNLLCriterion()
 end
 
 -- the initial state of the cell/hidden states
 init_state = {}
-for L=1,opt.num_layers do
-    local h_init = torch.zeros(opt.batch_size, opt.rnn_size)
-    -- TODO: wait, I'm confused. why are we making a tensor of dimensions
-    -- TODO: (batchsize, rnnsize)? shouldn't it be just (rnn_size)? does this
-    -- TODO: have one item per batch?
-    --
-    -- TODO: if opt.model == 'cgru' then
-    -- TODO:     h_init = torch.zeros(m, width, height)
-    -- TODO: end
-    h_init = asgpu(h_init)
-    table.insert(init_state, h_init:clone())
-    if opt.model == 'lstm' then
+if opt.model == 'cgru' then
+    h_init = asgpu(torch.zeros(opt.rnn_size, opt.cgru_width, opt.cgru_height))
+    init_state[1] = h_init
+else
+    for L=1,opt.num_layers do
+        local h_init = torch.zeros(opt.batch_size, opt.rnn_size)
+        h_init = asgpu(h_init)
         table.insert(init_state, h_init:clone())
+        if opt.model == 'lstm' then
+            table.insert(init_state, h_init:clone())
+        end
     end
 end
 
@@ -199,6 +225,11 @@ params, grad_params = model_utils.combine_all_parameters(protos.rnn)
 -- initialization
 if do_random_init then
     -- TODO: what initialization did n-gpu/c-gru paper use?
+    -- TODO: initializing to weights of 1 seems pretty likely to be a huge win
+    --       even for cgru, because cgru still needs to remember things. cgru
+    --       is more like a crapton of grus all feeding into each other; it still
+    --       has the memory problem. that said, the gru arch does the same job,
+    --       just slower. TODO: do we need that speed?
     params:uniform(-0.08, 0.08) -- small uniform numbers
 end
 -- initialize the LSTM forget gates with slightly higher biases to encourage remembering in the beginning
@@ -243,21 +274,36 @@ function eval_split(split_index, max_batches)
     
     for i = 1,n do -- iterate over batches in the split
         -- fetch a batch
+
+        -- return: tensor(batch_size, seq_length), tensor(batch_size, seq_length)
         local x, y = loader:next_batch(split_index)
+
+        -- return: tensor(seq_length, batch_size), tensor(seq_length, batch_size)
         x,y = prepro(x,y)
-        -- TODO: whatever we do to the forward pass in feval also needs to be
-        -- TODO: done here, and in sample.lua (really could benefit from less
-        -- TODO: code duplication...)
+
         -- forward pass
         for t=1,opt.seq_length do
             clones.rnn[t]:evaluate() -- for dropout proper functioning
+            -- x = tensor(seq_length, batch_size) so
+            -- x[t] = tensor(batch_size)
+            -- yes, that's one dimension! it's an array of char indexes.
+
+            -- rnn_state[t-1][*] = tensor(batch_size, ...)
+            -- cgru: ... = opt.rnn_size (ie, m), opt.cgru_width, opt.cgru_height
+            -- rnn-like: ... = opt.rnn_size
+
             local lst = clones.rnn[t]:forward{x[t], unpack(rnn_state[t-1])}
+
+            -- this assumes that the final output is the prediction
             rnn_state[t] = {}
             for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end
             prediction = lst[#lst] 
+
             loss = loss + clones.criterion[t]:forward(prediction, y[t])
         end
-        -- carry over lstm state
+        -- carry over state between batches
+        -- this depends on batch continuity being established in the loader;
+        -- the particular series of transforms gives us that guarantee.
         rnn_state[0] = rnn_state[#rnn_state]
         print(i .. '/' .. n .. '...')
     end
@@ -294,8 +340,14 @@ function feval(x)
     -- TODO:     ??????
     -- TODO:     something regarding unsharing the weights of clones and then
     -- TODO:     mathing it somehow? need to actually read the end of the paper,
-    -- TODO:     just skimmed it
-    -- TODO:     see the end of "neural gpus learn algorithms"
+    -- TODO:     just skimmed it. how do they decide which instance to use? are
+    -- TODO:     there just a fixed number and that's the max number of steps?
+    -- TODO:     or are they doing something like round robin, or is the network
+    -- TODO:     deciding which next layer to run? (also, how did that paper
+    -- TODO:     that does submodel selection with q learners do it?)
+    -- TODO:
+    -- TODO:     see the end of "neural gpus learn algorithms" and I don't
+    -- TODO:     remember the name of the q learning paper in question
     -- TODO:     ??????
     -- TODO: end
     loss = loss / opt.seq_length
@@ -319,10 +371,12 @@ function feval(x)
     end
     ------------------------ misc ----------------------
     -- transfer final state to initial state (BPTT)
-    -- TODO: what is bptt, exactly? I thought it was just backprop over multiple
-    -- TODO: timesteps, but this looks like it might be doing more than that?
-    init_state_global = rnn_state[#rnn_state] -- NOTE: I don't think this needs to be a clone, right?
-    -- grad_params:div(opt.seq_length) -- this line should be here but since we use rmsprop it would have no effect. Removing for efficiency
+    -- NOTE: I don't think this needs to be a clone, right?
+    init_state_global = rnn_state[#rnn_state]
+
+    -- this line should be here but since we use rmsprop it would have no effect. Removing for efficiency
+    -- grad_params:div(opt.seq_length)
+
     -- clip gradient element-wise
     grad_params:clamp(-opt.grad_clip, opt.grad_clip)
     return loss, grad_params
@@ -379,6 +433,7 @@ for i = 1, iterations do
         checkpoint.i = i
         checkpoint.epoch = epoch
         checkpoint.vocab = loader.vocab_mapping
+        -- TODO: checkpoint the cgru info too
         torch.save(savefile, checkpoint)
     end
 
