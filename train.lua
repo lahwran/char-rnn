@@ -13,6 +13,8 @@ which is turn based on other stuff in Torch, etc... (long lineage)
 
 ]]--
 
+-- require('mobdebug').start()
+
 require 'torch'
 require 'nn'
 require 'nngraph'
@@ -20,6 +22,8 @@ require 'optim'
 require 'lfs'
 
 require 'util.OneHot'
+require 'util.ReadSlice'
+require 'util.WriteSlice'
 require 'util.misc'
 local CharSplitLMMinibatchLoader = require 'util.CharSplitLMMinibatchLoader'
 local model_utils = require 'util.model_utils'
@@ -38,7 +42,7 @@ cmd:option('-data_dir','data/tinyshakespeare','data directory. Should contain th
 -- model params
 cmd:option('-rnn_size', 128, 'size of LSTM internal state')
 cmd:option('-num_layers', 2, 'number of layers in the LSTM')
-cmd:option('-model', 'lstm', 'lstm,gru or rnn')
+cmd:option('-model', 'cgru', 'lstm,gru or rnn')
 -- optimization
 cmd:option('-learning_rate',2e-3,'learning rate')
 cmd:option('-learning_rate_decay',0.97,'learning rate decay')
@@ -46,7 +50,7 @@ cmd:option('-learning_rate_decay_after',10,'in number of epochs, when to start d
 cmd:option('-decay_rate',0.95,'decay rate for rmsprop')
 cmd:option('-dropout',0,'dropout for regularization, used after each RNN hidden layer. 0 = no dropout')
 cmd:option('-seq_length',50,'number of timesteps to unroll for')
-cmd:option('-batch_size',50,'number of sequences to train on in parallel')
+cmd:option('-batch_size',2,'number of sequences to train on in parallel')
 cmd:option('-max_epochs',50,'number of full passes through the training data')
 cmd:option('-grad_clip',5,'clip gradients at this value')
 cmd:option('-train_frac',0.95,'fraction of data that goes into train set')
@@ -70,6 +74,9 @@ cmd:option('-cgru_in_y', 1, 'position y to write to in mental image')
 cmd:option('-cgru_out_x', 0, 'position x to read from in mental image (0 = cgru_in_x)')
 cmd:option('-cgru_out_y', 0, 'position y to read from in mental image (0 = cgru_in_y)')
 cmd:text()
+-- parse input params
+opt = cmd:parse(arg)
+torch.manualSeed(opt.seed)
 
 -- TODO: bayesian optimization - might be that we can wrap the thingy?
 -- TODO: spearmint looks pretty easy to use. promising! if we can't get things
@@ -98,9 +105,6 @@ if opt.cgru_out_y == 0 then
     opt.cgru_out_y = opt.cgru_in_y
 end
 
--- parse input params
-opt = cmd:parse(arg)
-torch.manualSeed(opt.seed)
 -- train / val / test split for data, in fractions
 local test_frac = math.max(0, 1 - (opt.train_frac + opt.val_frac))
 local split_sizes = {opt.train_frac, opt.val_frac, test_frac} 
@@ -203,7 +207,7 @@ end
 -- the initial state of the cell/hidden states
 init_state = {}
 if opt.model == 'cgru' then
-    h_init = asgpu(torch.zeros(opt.rnn_size, opt.cgru_width, opt.cgru_height))
+    h_init = asgpu(torch.zeros(opt.batch_size, opt.rnn_size, opt.cgru_width, opt.cgru_height))
     init_state[1] = h_init
 else
     for L=1,opt.num_layers do

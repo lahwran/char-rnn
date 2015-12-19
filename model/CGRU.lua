@@ -47,8 +47,8 @@ function CGRU.cgru(input_size, m, dropout, in_x, in_y, out_x, out_y)
     table.insert(inputs, nn.Identity()()) -- character index
     table.insert(inputs, nn.Identity()()) -- prev_h
     
-    embedded = nn.LookupTable(input_size, m)()
-    local updated_h = WriteSlice({{}, in_x, in_y})({embedded, inputs[1]})
+    embedded = nn.LookupTable(input_size, m)(inputs[1])
+    local updated_h = WriteSlice({{}, in_x, in_y})({embedded, inputs[2]})
 
     local prev_h = updated_h
 
