@@ -73,6 +73,8 @@ cmd:option('-cgru_in_x', 1, 'position x to write to in mental image')
 cmd:option('-cgru_in_y', 1, 'position y to write to in mental image')
 cmd:option('-cgru_out_x', 0, 'position x to read from in mental image (0 = cgru_in_x)')
 cmd:option('-cgru_out_y', 0, 'position y to read from in mental image (0 = cgru_in_y)')
+cmd:option('-grad_noise', 1, 'whether to use grad_noise. hardcoded at stddev = 1/(iteration ^ (1/4)); *= grad:mean()')
+cmd:option('-hardmode', 0, 'whether to use hardmode. if 1, use "percentage of correct top-1s" as the displayed loss (NLL still used to train).')
 cmd:text()
 -- parse input params
 opt = cmd:parse(arg)
@@ -318,6 +320,24 @@ end
 
 -- do fwd/bwd and return loss, grad_params
 local init_state_global = clone_list(init_state)
+grad_noise = torch.Tensor()
+grad_noise = asgpu(grad_noise)
+grad_noise:resizeAs(grad_params)
+
+function hardloss(batch_predictions, batch_ys)
+    local _, maxes = batch_predictions:max(2)
+    local b = batch_ys:clone()
+    b:add(50)
+    maxes:add(50)
+    b:cdiv(asgpu(maxes:double()))
+    b:add(-1)
+    b:sign()
+    b:abs()
+    b:add(-1)
+    b:mul(-1)
+    return b:mean()
+end
+
 function feval(x)
     if x ~= params then
         params:copy(x)
@@ -337,7 +357,12 @@ function feval(x)
         rnn_state[t] = {}
         for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end -- extract the state, without output
         predictions[t] = lst[#lst] -- last element is the prediction
-        loss = loss + clones.criterion[t]:forward(predictions[t], y[t])
+        local curloss = clones.criterion[t]:forward(predictions[t], y[t])
+        if opt.hardmode then 
+            loss = loss + hardloss(predictions[t], y[t])
+        else
+            loss = loss + curloss
+        end
     end
     -- TODO: parameter sharing relaxation - not just for cgru
     -- TODO: if opt.param_sharing_relaxation then
@@ -382,6 +407,11 @@ function feval(x)
     -- grad_params:div(opt.seq_length)
 
     -- clip gradient element-wise
+    
+    if opt.grad_noise then
+        grad_noise:mul(grad_params:mean() * opt.grad_noise)
+        grad_params:add(grad_noise)
+    end
     grad_params:clamp(-opt.grad_clip, opt.grad_clip)
     return loss, grad_params
 end
@@ -397,6 +427,9 @@ for i = 1, iterations do
     local epoch = i / loader.ntrain
 
     local timer = torch.Timer()
+    if opt.grad_noise then
+        grad_noise:normal(0, 1.0/(i^(1/4)))
+    end
     local _, loss = optim.rmsprop(feval, params, optim_state)
     if opt.accurate_gpu_timing == 1 and opt.gpuid >= 0 then
         --[[
@@ -437,12 +470,17 @@ for i = 1, iterations do
         checkpoint.i = i
         checkpoint.epoch = epoch
         checkpoint.vocab = loader.vocab_mapping
-        -- TODO: checkpoint the cgru info too
         torch.save(savefile, checkpoint)
     end
 
-    if i % opt.print_every == 0 then
-        print(string.format("%d/%d (epoch %.3f), train_loss = %6.8f, grad/param norm = %6.4e, time/batch = %.4fs", i, iterations, epoch, train_loss, grad_params:norm() / params:norm(), time))
+    if i % opt.print_every == 1 then
+        local gradnorm = grad_params:norm()
+        local paramnorm = params:norm()
+        print(string.format("%d/%d (epoch %.3f), train_loss = %.8g, grad norm/std/mean = %.4g/%.4g/%.4g, param n/s/m = %.4g/%.4g/%.4g, grad/param norm = %.4g, time: batch = %.4fs, unroll = %.4f/s", i, iterations, epoch, train_loss,
+                gradnorm, grad_params:std(), grad_params:mean(),
+                paramnorm, params:std(), params:mean(),
+                gradnorm / paramnorm,
+                time, opt.batch_size / time))
     end
    
     if i % 10 == 0 then collectgarbage() end

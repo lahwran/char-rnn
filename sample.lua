@@ -16,6 +16,8 @@ require 'lfs'
 
 require 'util.OneHot'
 require 'util.misc'
+require 'util.WriteSlice'
+require 'util.ReadSlice'
 
 cmd = torch.CmdLine()
 cmd:text()
@@ -33,6 +35,8 @@ cmd:option('-temperature',1,'temperature of sampling')
 cmd:option('-gpuid',0,'which gpu to use. -1 = use CPU')
 cmd:option('-opencl',0,'use OpenCL (instead of CUDA)')
 cmd:option('-verbose',1,'set to 0 to ONLY print the sampled text, no diagnostics')
+cmd:option('-cgru_width',-1,'width of the cgru "mental image" (default: same as model)')
+cmd:option('-cgru_height',-1,'height of the cgru "mental image" (default: same as model)')
 cmd:text()
 
 -- parse input params
@@ -55,8 +59,7 @@ if opt.gpuid >= 0 and opt.opencl == 0 then
         cutorch.setDevice(opt.gpuid + 1) -- note +1 to make it 0 indexed! sigh lua
         cutorch.manualSeed(opt.seed)
     else
-        gprint('Falling back on CPU mode')
-        opt.gpuid = -1 -- overwrite user setting
+        os.exit(1)
     end
 end
 
@@ -72,8 +75,15 @@ if opt.gpuid >= 0 and opt.opencl == 1 then
         cltorch.setDevice(opt.gpuid + 1) -- note +1 to make it 0 indexed! sigh lua
         torch.manualSeed(opt.seed)
     else
-        gprint('Falling back on CPU mode')
-        opt.gpuid = -1 -- overwrite user setting
+        os.exit(1)
+    end
+end
+function asgpu(v)
+    if opt.gpuid >=0 and opt.opencl == 0 then
+        return v:float():cuda()
+    end
+    if opt.gpuid >=0 and opt.opencl == 1 then
+        return v:cl()
     end
 end
 
@@ -84,6 +94,12 @@ if not lfs.attributes(opt.model, 'mode') then
     gprint('Error: File ' .. opt.model .. ' does not exist. Are you sure you didn\'t forget to prepend cv/ ?')
 end
 checkpoint = torch.load(opt.model)
+if opt.cgru_width == -1 then
+    opt.cgru_width = checkpoint.opt.cgru_width
+end
+if opt.cgru_height == -1 then
+    opt.cgru_height = checkpoint.opt.cgru_height
+end
 protos = checkpoint.protos
 protos.rnn:evaluate() -- put in eval mode so that dropout works properly
 
@@ -96,14 +112,17 @@ for c,i in pairs(vocab) do ivocab[i] = c end
 gprint('creating an ' .. checkpoint.opt.model .. '...')
 local current_state
 current_state = {}
-for L = 1,checkpoint.opt.num_layers do
-    -- c and h for all layers
-    local h_init = torch.zeros(1, checkpoint.opt.rnn_size):double()
-    if opt.gpuid >= 0 and opt.opencl == 0 then h_init = h_init:cuda() end
-    if opt.gpuid >= 0 and opt.opencl == 1 then h_init = h_init:cl() end
-    table.insert(current_state, h_init:clone())
-    if checkpoint.opt.model == 'lstm' then
+if checkpoint.opt.model == 'cgru' then
+    h_init = asgpu(torch.zeros(1, checkpoint.opt.rnn_size, opt.cgru_width, opt.cgru_height))
+    current_state[1] = h_init
+else
+    for L = 1,checkpoint.opt.num_layers do
+        -- c and h for all layers
+        local h_init = asgpu(torch.zeros(1, checkpoint.opt.rnn_size):double())
         table.insert(current_state, h_init:clone())
+        if checkpoint.opt.model == 'lstm' then
+            table.insert(current_state, h_init:clone())
+        end
     end
 end
 state_size = #current_state
@@ -116,8 +135,7 @@ if string.len(seed_text) > 0 then
     for c in seed_text:gmatch'.' do
         prev_char = torch.Tensor{vocab[c]}
         io.write(ivocab[prev_char[1]])
-        if opt.gpuid >= 0 and opt.opencl == 0 then prev_char = prev_char:cuda() end
-        if opt.gpuid >= 0 and opt.opencl == 1 then prev_char = prev_char:cl() end
+        prev_char = asgpu(prev_char)
         local lst = protos.rnn:forward{prev_char, unpack(current_state)}
         -- lst is a list of [state1,state2,..stateN,output]. We want everything but last piece
         current_state = {}
@@ -128,9 +146,7 @@ else
     -- fill with uniform probabilities over characters (? hmm)
     gprint('missing seed text, using uniform probability over first character')
     gprint('--------------------------')
-    prediction = torch.Tensor(1, #ivocab):fill(1)/(#ivocab)
-    if opt.gpuid >= 0 and opt.opencl == 0 then prediction = prediction:cuda() end
-    if opt.gpuid >= 0 and opt.opencl == 1 then prediction = prediction:cl() end
+    prediction = asgpu(torch.Tensor(1, #ivocab):fill(1)/(#ivocab))
 end
 
 -- start sampling/argmaxing
