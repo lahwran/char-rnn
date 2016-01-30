@@ -1,11 +1,7 @@
-next steps:
-
-- figure out the exact layout of x[t] and rnn_state when calling :forward
-- initialize volume instead of vector for previous state
-- hook up width/height blah blah
-- try running it and see how it blows up
-- maybe that's it?
-
+- skip-forward copying of outer edges of hidden state
+- need that hyperparameter opt - I expect small hidden state actually works
+    quite well, maybe 4x4 or a bit more
+- copy outer edges something something
 
 
 

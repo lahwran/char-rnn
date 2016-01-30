@@ -1,0 +1,4 @@
+- bigger net
+- smaller testcase
+need to tune batch size and learning rate together
+multiply - or divide? - by the batch size, or multiply/divide by the sqaure root (which is more theoretically justified). if you quadruple the batch size, you want the learning rate to increase by a factor of two. there's a thread on reddit about this. you need to increase the learning rate when you incrase the batch size, and ... as you increase the batch size, you're averaging away the variance in the gradient so you need to take larger steps to compensate.
