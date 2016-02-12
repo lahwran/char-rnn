@@ -1,3 +1,6 @@
 *.t7
 worm/
 worm.html
+*.csv
+*_data/
+sandbox/*
