@@ -58,7 +58,7 @@ function CGRU.cgru(input_size, m, dropout, in_x, in_y, out_x, out_y)
         local stride = 1 -- leave this at 1
         local padding = 1 -- w = (w + 2*p - k) + 1 solve for p where k = 3
                           -- (ie (k-1)/2)
-        return activation(nn.SpatialConvolution(m, m, kernsize, kernsize,
+        return activation(cudnn.SpatialConvolution(m, m, kernsize, kernsize,
                                             stride, stride,
                                             padding, padding)(hidden))
     end
