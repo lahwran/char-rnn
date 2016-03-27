@@ -75,6 +75,7 @@ cmd:option('-cgru_out_x', 0, 'position x to read from in mental image (0 = cgru_
 cmd:option('-cgru_out_y', 0, 'position y to read from in mental image (0 = cgru_in_y)')
 cmd:option('-grad_noise', 1, 'whether to use grad_noise. hardcoded at stddev = 1/(iteration ^ (1/4)); *= grad:mean()')
 cmd:option('-hardmode', 0, 'whether to use hardmode. if 1, use "percentage of correct top-1s" as the displayed loss (NLL still used to train).')
+cmd:option('-forward_steps', 1, 'number of steps forward to train on')
 cmd:text()
 -- parse input params
 opt = cmd:parse(arg)
@@ -194,7 +195,7 @@ else
     print('creating an ' .. opt.model .. ' with ' .. opt.num_layers .. ' layers')
     protos = {}
     if opt.model == 'lstm' then
-        protos.rnn = LSTM.lstm(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
+        protos.rnn = LSTM.lstm(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout, opt.forward_steps)
     elseif opt.model == 'gru' then
         protos.rnn = GRU.gru(vocab_size, opt.rnn_size, opt.num_layers, opt.dropout)
     elseif opt.model == 'rnn' then
@@ -255,10 +256,9 @@ end
 print('number of parameters in the model: ' .. params:nElement())
 -- make a bunch of clones after flattening, as that reallocates memory
 clones = {}
-for name,proto in pairs(protos) do
-    print('cloning ' .. name)
-    clones[name] = model_utils.clone_many_times(proto, opt.seq_length, not proto.parameters)
-end
+local criterion_steps = (opt.seq_length * opt.forward_steps) - ((opt.forward_steps - 1) * opt.forward_steps) / 2
+clones.criterion = model_utils.clone_many_times(protos.criterion, criterion_steps, not protos.criterion.parameters)
+clones.rnn = model_utils.clone_many_times(protos.rnn, opt.seq_length, not protos.rnn.parameters)
 
 -- preprocessing helper function
 function prepro(x,y)
@@ -304,9 +304,9 @@ function eval_split(split_index, max_batches)
             -- this assumes that the final output is the prediction
             rnn_state[t] = {}
             for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end
-            prediction = lst[#lst] 
+            prediction = lst[#init_state + 1] 
 
-            loss = loss + clones.criterion[t]:forward(prediction, y[t])
+            loss = loss + clones.criterion[t][1]:forward(prediction, y[t])
         end
         -- carry over state between batches
         -- this depends on batch continuity being established in the loader;
@@ -339,6 +339,10 @@ function hardloss(batch_predictions, batch_ys)
     return b:mean()
 end
 
+function crindex(t, i)
+    return (t - 1) * opt.forward_steps + i
+end
+
 function feval(x)
     if x ~= params then
         params:copy(x)
@@ -357,12 +361,21 @@ function feval(x)
         local lst = clones.rnn[t]:forward{x[t], unpack(rnn_state[t-1])}
         rnn_state[t] = {}
         for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end -- extract the state, without output
-        predictions[t] = lst[#lst] -- last element is the prediction
-        local curloss = clones.criterion[t]:forward(predictions[t], y[t])
-        if opt.hardmode == 1 then 
-            loss = loss + hardloss(predictions[t], y[t])
-        else
-            loss = loss + curloss
+        predictions[t] = {}
+        local steps = opt.forward_steps
+        if (steps - 1) + t > opt.seq_length then
+            steps = (opt.seq_length - t) + 1
+        end
+        for i=1,steps do
+            local prediction = lst[#init_state + i]
+            local target = y[t + (i - 1)]
+            table.insert(predictions[t], prediction) 
+            local curloss = clones.criterion[crindex(t, i)]:forward(prediction, target)
+            if opt.hardmode == 1 then 
+                loss = loss + hardloss(prediction, target)
+            else
+                loss = loss + curloss
+            end
         end
     end
     -- TODO: parameter sharing relaxation - not just for cgru
@@ -380,15 +393,19 @@ function feval(x)
     -- TODO:     remember the name of the q learning paper in question
     -- TODO:     ??????
     -- TODO: end
-    loss = loss / opt.seq_length
+    loss = loss / #clones.criterion
     ------------------ backward pass -------------------
     -- initialize gradient at time t to be zeros (there's no influence from future)
     -- TODO: gradient noise - probably already solved in torch, or trivially easy
     local drnn_state = {[opt.seq_length] = clone_list(init_state, true)} -- true also zeros the clones
     for t=opt.seq_length,1,-1 do
         -- backprop through loss, and softmax/linear
-        local doutput_t = clones.criterion[t]:backward(predictions[t], y[t])
-        table.insert(drnn_state[t], doutput_t)
+        for i=1,#predictions[t] do
+            local prediction = predictions[t][i]
+            local target = y[t + (i - 1)]
+            local doutput_ti = clones.criterion[crindex(t, i)]:backward(prediction, target)
+            table.insert(drnn_state[t], doutput_ti)
+        end
         local dlst = clones.rnn[t]:backward({x[t], unpack(rnn_state[t-1])}, drnn_state[t])
         drnn_state[t-1] = {}
         for k,v in pairs(dlst) do

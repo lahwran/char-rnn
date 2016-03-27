@@ -1,6 +1,6 @@
 
 local LSTM = {}
-function LSTM.lstm(input_size, rnn_size, n, dropout)
+function LSTM.lstm(input_size, rnn_size, n, dropout, forward_steps)
   dropout = dropout or 0 
 
   -- there will be 2*n+1 inputs
@@ -53,10 +53,12 @@ function LSTM.lstm(input_size, rnn_size, n, dropout)
 
   -- set up the decoder
   local top_h = outputs[#outputs]
-  if dropout > 0 then top_h = nn.Dropout(dropout)(top_h) end
-  local proj = nn.Linear(rnn_size, input_size)(top_h):annotate{name='decoder'}
-  local logsoft = nn.LogSoftMax()(proj)
-  table.insert(outputs, logsoft)
+  for S=1,forward_steps do
+    if dropout > 0 then top_h = nn.Dropout(dropout)(top_h) end
+    local proj = nn.Linear(rnn_size, input_size)(top_h):annotate{name='decoder'}
+    local logsoft = nn.LogSoftMax()(proj)
+    table.insert(outputs, logsoft)
+  end
 
   return nn.gModule(inputs, outputs)
 end
