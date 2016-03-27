@@ -306,7 +306,7 @@ function eval_split(split_index, max_batches)
             for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end
             prediction = lst[#init_state + 1] 
 
-            loss = loss + clones.criterion[t][1]:forward(prediction, y[t])
+            loss = loss + clones.criterion[crindex(t, 1)]:forward(prediction, y[t])
         end
         -- carry over state between batches
         -- this depends on batch continuity being established in the loader;
@@ -340,7 +340,17 @@ function hardloss(batch_predictions, batch_ys)
 end
 
 function crindex(t, i)
-    return (t - 1) * opt.forward_steps + i
+    local position = (t - 1) * opt.forward_steps
+    local steps_lost = 0
+    if (opt.forward_steps - 1) + t > opt.seq_length then
+        steps_lost = opt.forward_steps - ((opt.seq_length - t) + 1)
+    end
+    local position_lost = ((steps_lost - 1) * steps_lost) / 2
+    return (position - position_lost) + i
+end
+
+function scale_func(index)
+    return 1/index
 end
 
 function feval(x)
@@ -356,6 +366,7 @@ function feval(x)
     local rnn_state = {[0] = init_state_global}
     local predictions = {}           -- softmax outputs
     local loss = 0
+    local comparible_loss = 0
     for t=1,opt.seq_length do
         clones.rnn[t]:training() -- make sure we are in correct mode (this is cheap, sets flag)
         local lst = clones.rnn[t]:forward{x[t], unpack(rnn_state[t-1])}
@@ -371,6 +382,9 @@ function feval(x)
             local target = y[t + (i - 1)]
             table.insert(predictions[t], prediction) 
             local curloss = clones.criterion[crindex(t, i)]:forward(prediction, target)
+            if i == 1 then
+                comparible_loss = comparible_loss + curloss
+            end
             if opt.hardmode == 1 then 
                 loss = loss + hardloss(prediction, target)
             else
@@ -394,18 +408,29 @@ function feval(x)
     -- TODO:     ??????
     -- TODO: end
     loss = loss / #clones.criterion
+    comparible_loss = comparible_loss / opt.seq_length
+    print(string.format("comparible: %s", comparible_loss))
     ------------------ backward pass -------------------
     -- initialize gradient at time t to be zeros (there's no influence from future)
     -- TODO: gradient noise - probably already solved in torch, or trivially easy
     local drnn_state = {[opt.seq_length] = clone_list(init_state, true)} -- true also zeros the clones
+    local zero_grads = torch.Tensor()
+    zero_grads = torch.Tensor()
+    zero_grads = asgpu(grad_noise)
     for t=opt.seq_length,1,-1 do
         -- backprop through loss, and softmax/linear
         for i=1,#predictions[t] do
             local prediction = predictions[t][i]
             local target = y[t + (i - 1)]
             local doutput_ti = clones.criterion[crindex(t, i)]:backward(prediction, target)
+            doutput_ti:mul(scale_func(i))
+            zero_grads:resizeAs(doutput_ti)
             table.insert(drnn_state[t], doutput_ti)
         end
+        for i=#predictions[t]+1,opt.forward_steps do
+            table.insert(drnn_state[t], zero_grads)
+        end
+
         local dlst = clones.rnn[t]:backward({x[t], unpack(rnn_state[t-1])}, drnn_state[t])
         drnn_state[t-1] = {}
         for k,v in pairs(dlst) do
